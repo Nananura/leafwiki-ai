@@ -15,7 +15,7 @@ COPY . .
 COPY --from=frontend-build /app/dist ./internal/http/dist
 RUN CGO_ENABLED=0 go build \
 	-ldflags="-s -w -X github.com/perber/wiki/internal/http.EmbedFrontend=true -X github.com/perber/wiki/internal/http.Environment=production" \
-	-o /out/leafwiki ./cmd/leafwiki/main.go
+	-o /out/leafwiki ./cmd/leafwiki/
 
 # Step 3: Final image (small)
 FROM alpine:3.23 AS final
