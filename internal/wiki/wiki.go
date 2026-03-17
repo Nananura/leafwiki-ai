@@ -968,6 +968,13 @@ func (w *Wiki) GetStorageDir() string {
 
 func (w *Wiki) Close() error {
 	w.status.Finish()
+	
+	if w.auth != nil {
+		if err := w.auth.Close(); err != nil {
+			return err
+		}
+	}
+	
 	if err := w.user.Close(); err != nil {
 		return err
 	}

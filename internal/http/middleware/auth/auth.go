@@ -20,6 +20,11 @@ func RequireAuth(wikiInstance *wiki.Wiki, authCookies *AuthCookies, authDisabled
 			return
 		}
 
+		if apiKeyAuth, exists := c.Get("api_key_auth"); exists && apiKeyAuth.(bool) {
+			c.Next()
+			return
+		}
+
 		token, err := authCookies.ReadAccess(c)
 		if err != nil || token == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Missing or invalid access token"})

@@ -12,7 +12,7 @@
 *.test
 
 # Main binary
-leafwiki
+/leafwiki
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
@@ -48,3 +48,5 @@ __debug*
 local
 
 ui.zip
+
+test-wiki-data

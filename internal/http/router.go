@@ -17,6 +17,8 @@ import (
 	"github.com/perber/wiki/internal/http/middleware/security"
 	"github.com/perber/wiki/internal/importer"
 	"github.com/perber/wiki/internal/wiki"
+	"github.com/mark3labs/mcp-go/server"
+	leafmcp "github.com/perber/wiki/internal/mcp"
 )
 
 //go:embed dist/**
@@ -59,6 +61,7 @@ type RouterOptions struct {
 	HideLinkMetadataSection bool          // Whether to hide the link metadata section in the frontend UI
 	AuthDisabled            bool          // Whether authentication is disabled
 	BasePath                string        // URL prefix when served behind a reverse proxy (e.g. "/wiki")
+	ApiKey                  string        // API key for programmatic access bypassing auth/CSRF
 }
 
 // wireImporterService sets up and returns an ImporterService instance
@@ -146,8 +149,36 @@ func NewRouter(wikiInstance *wiki.Wiki, options RouterOptions) *gin.Engine {
 		}
 	}
 
+	// MCP Server endpoint - protected by API key only (no CSRF, no session cookies)
+	// Uses Streamable HTTP transport (single endpoint, handles GET and POST)
+	// https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http
+	if options.ApiKey != "" {
+		mcpServer := leafmcp.SetupMCPServer(wikiInstance)
+		streamableServer := server.NewStreamableHTTPServer(mcpServer)
+		mcpEndpoint := options.BasePath + "/api/mcp"
+
+		router.Use(func(c *gin.Context) {
+			if c.Request.URL.Path != mcpEndpoint {
+				c.Next()
+				return
+			}
+
+			// Validate API key
+			authHeader := c.GetHeader("Authorization")
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) != 2 || parts[0] != "Bearer" || parts[1] != options.ApiKey {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Valid API key required. Use Authorization: Bearer <api-key>"})
+				return
+			}
+
+			// Hand off directly to Streamable HTTP server
+			streamableServer.ServeHTTP(c.Writer, c.Request)
+			c.Abort()
+		})
+	}
+
 	requiresAuthGroup := base.Group("/api")
-	requiresAuthGroup.Use(auth_middleware.InjectPublicEditor(options.AuthDisabled), auth_middleware.RequireAuth(wikiInstance, authCookies, options.AuthDisabled), security.CSRFMiddleware(csrfCookie))
+	requiresAuthGroup.Use(auth_middleware.ApiKeyAuth(options.ApiKey), auth_middleware.InjectPublicEditor(options.AuthDisabled), auth_middleware.RequireAuth(wikiInstance, authCookies, options.AuthDisabled), security.CSRFMiddleware(csrfCookie))
 	{
 		// If public access is disabled, we need to ensure that the tree and pages routes are protected
 		// and require authentication. If public access is enabled, these routes are already handled

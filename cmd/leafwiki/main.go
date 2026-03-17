@@ -21,6 +21,7 @@ func printUsage() {
 	leafwiki --disable-auth [--host <HOST>] [--port <PORT>] [--data-dir <DIR>]
 	leafwiki reset-admin-password
 	leafwiki [--data-dir <DIR>] reconstruct-tree
+	leafwiki mcp [--data-dir <DIR>]
 	leafwiki --help
 
 	Options:
@@ -29,6 +30,7 @@ func printUsage() {
 	--data-dir         Path to data directory (default: ./data)
 	--admin-password   Initial admin password (used only if no admin exists)
 	--jwt-secret       Secret for signing auth tokens (JWT) (required)
+	--api-key          API Key for programmatic access (bypasses auth/CSRF)
 	--public-access    Allow public access to the wiki only with read access (default: false)
 	--allow-insecure   Allow insecure HTTP connections (default: false)                      
 	--access-token-timeout  Access token timeout duration (e.g. 24h, 15m) (default: 15m)
@@ -44,6 +46,7 @@ func printUsage() {
 	LEAFWIKI_PORT
 	LEAFWIKI_DATA_DIR
 	LEAFWIKI_JWT_SECRET
+	LEAFWIKI_API_KEY
 	LEAFWIKI_LOG_LEVEL
 	LEAFWIKI_ADMIN_PASSWORD
 	LEAFWIKI_PUBLIC_ACCESS
@@ -89,6 +92,7 @@ func main() {
 	dataDirFlag := flag.String("data-dir", "", "path to data directory")
 	adminPasswordFlag := flag.String("admin-password", "", "initial admin password")
 	jwtSecretFlag := flag.String("jwt-secret", "", "JWT secret for authentication")
+	apiKeyFlag := flag.String("api-key", "", "API key for programmatic access")
 	publicAccessFlag := flag.Bool("public-access", false, "allow public access to the wiki with read access (default: false)")
 	allowInsecureFlag := flag.Bool("allow-insecure", false, "allow insecure HTTP connections (default: false)")
 	injectCodeInHeaderFlag := flag.String("inject-code-in-header", "", "raw string injected into <head> (default: \"\")")
@@ -108,6 +112,7 @@ func main() {
 	dataDir := resolveString("data-dir", *dataDirFlag, visited, "LEAFWIKI_DATA_DIR", "./data")
 	adminPassword := resolveString("admin-password", *adminPasswordFlag, visited, "LEAFWIKI_ADMIN_PASSWORD", "")
 	jwtSecret := resolveString("jwt-secret", *jwtSecretFlag, visited, "LEAFWIKI_JWT_SECRET", "")
+	apiKey := resolveString("api-key", *apiKeyFlag, visited, "LEAFWIKI_API_KEY", "")
 	injectCodeInHeader := resolveString("inject-code-in-header", *injectCodeInHeaderFlag, visited, "LEAFWIKI_INJECT_CODE_IN_HEADER", "")
 	allowInsecure := resolveBool("allow-insecure", *allowInsecureFlag, visited, "LEAFWIKI_ALLOW_INSECURE")
 	publicAccess := resolveBool("public-access", *publicAccessFlag, visited, "LEAFWIKI_PUBLIC_ACCESS")
@@ -145,6 +150,9 @@ func main() {
 				fail("Tree reconstruction failed", "error", err)
 			}
 			fmt.Println("Tree reconstructed successfully from filesystem.")
+			return
+		case "mcp":
+			runMCPServer(dataDir)
 			return
 		case "--help", "-h", "help":
 			printUsage()
@@ -208,6 +216,7 @@ func main() {
 		RefreshTokenTimeout:     refreshTokenTimeout,
 		AuthDisabled:            disableAuth,
 		BasePath:                basePath,
+		ApiKey:                  apiKey,
 	})
 
 	// Start server - combine host and port

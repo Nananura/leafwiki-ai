@@ -19,6 +19,11 @@ func CSRFMiddleware(csrf *CSRFCookie) gin.HandlerFunc {
 			return
 		}
 
+		if apiKeyAuth, exists := c.Get("api_key_auth"); exists && apiKeyAuth.(bool) {
+			c.Next()
+			return
+		}
+
 		cookieToken, err := csrf.Read(c)
 		if err != nil || cookieToken == "" {
 			log.Printf("CSRF token missing or error reading token: %v", err)

@@ -236,3 +236,7 @@ func (a *AuthService) ValidateToken(tokenString string) (*User, error) {
 
 	return a.userService.GetUserByID(userID)
 }
+
+func (a *AuthService) Close() error {
+	return a.sessionStore.Close()
+}

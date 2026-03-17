@@ -293,6 +293,7 @@ These options control how the server runs after installation.
 | `--refresh-token-timeout`       | Refresh token timeout duration (e.g. 168h, 7d)                         | `7d`          | v0.7.0            |
 | `--disable-auth`                | ⚠️ Disable  authentication & authorization (internal networks only!)   | `false`       | v0.7.0            |
 | `--base-path`                | URL prefix when served behind a reverse proxy (e.g. /wiki)    | `""`       | v0.8.2            |
+| `--api-key`                     | API key for programmatic access (MCP server, AI agents)        | `""`          | v0.9.0            |
 
 
 > When using the official Docker image, `LEAFWIKI_HOST` defaults to `0.0.0.0` if neither a `--host` flag nor `LEAFWIKI_HOST` is provided, as the container entrypoint sets this automatically.
@@ -317,6 +318,7 @@ This is especially useful in containerized or production environments.
 | `LEAFWIKI_REFRESH_TOKEN_TIMEOUT`       | Refresh token timeout duration (e.g. 168h, 7d)                          | `7d`       | v0.7.0          |
 | `LEAFWIKI_DISABLE_AUTH`                | ⚠️ Disable  authentication & authorization (internal networks only!)    | `false`    | v0.7.0          |
 | `LEAFWIKI_BASE_PATH`                   | URL prefix when served behind a reverse proxy (e.g. /wiki)              | `""`       | v0.8.2          |
+| `LEAFWIKI_API_KEY`                     | API key for programmatic access (MCP server, AI agents)                 | `""`       | v0.9.0          |
 
 
 These environment variables override the default values and are especially useful in containerized or production environments.
@@ -449,6 +451,73 @@ The importer is available as admin in the UI and can be used to quickly bring ex
 At the moment the importer does not support all features of the wiki (e.g. metadata, backlinks, assets, ...) but it provides a fast way to get started with existing Markdown content.
 
 Please open an issue if you have specific feature requests or feedback for the importer.
+
+---
+
+## AI Agent Integration (MCP Server)
+
+LeafWiki includes a built-in [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that allows AI agents and tools to read, create, update, and manage wiki content programmatically.
+
+### Enabling the MCP Server
+
+The MCP endpoint is enabled automatically when an API key is configured:
+
+```bash
+./leafwiki --jwt-secret=yoursecret --admin-password=yourpassword --api-key=your-secret-api-key
+```
+
+Or via environment variable:
+
+```bash
+export LEAFWIKI_API_KEY=your-secret-api-key
+```
+
+The MCP server is available at `POST /api/mcp` using the [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http).
+
+### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `list_pages` | List all pages and sections as a tree structure |
+| `read_page` | Read the markdown content of a page by its path |
+| `search_wiki` | Full-text search across all wiki pages |
+| `create_page` | Create a new page or section (with auto-created intermediate sections) |
+| `update_page` | Update a page's content and/or title |
+| `delete_page` | Delete a page or section (with optional recursive delete) |
+| `move_page` | Move a page or section to a new location in the tree |
+
+### Configuring AI Clients
+
+To connect an AI agent (e.g., VS Code with Copilot, Cursor, Claude Desktop) to your LeafWiki instance, configure the MCP server in your client's settings:
+
+```json
+{
+  "servers": {
+    "leafwiki": {
+      "url": "http://localhost:8080/api/mcp",
+      "headers": {
+        "Authorization": "Bearer your-secret-api-key"
+      }
+    }
+  }
+}
+```
+
+### Standalone MCP Server (stdio)
+
+LeafWiki also supports running a standalone MCP server over stdio for local AI agents:
+
+```bash
+./leafwiki mcp --data-dir ./data
+```
+
+This mode is useful for AI agents that run on the same machine and communicate via standard input/output (e.g., Claude Desktop local tools).
+
+### Security Notes
+
+- The MCP endpoint requires a valid API key (`Authorization: Bearer <key>`) for all requests.
+- The API key bypasses standard cookie/CSRF authentication, so keep it secure.
+- Without `--api-key`, the MCP endpoint is not registered.
 
 ---
 
