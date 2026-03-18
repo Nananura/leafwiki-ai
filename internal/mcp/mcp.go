@@ -266,5 +266,525 @@ func SetupMCPServer(w *wiki.Wiki) *server.MCPServer {
 		return mcp.NewToolResultText(fmt.Sprintf("Page moved successfully.\nID: %s\nNew path: %s\nTitle: %s", movedPage.ID, movedPage.CalculatePath(), movedPage.Title)), nil
 	})
 
+	// 8. Tool: edit_page
+	editPageTool := mcp.NewTool("edit_page",
+		mcp.WithDescription("Search & replace content within a page. Good for targeted edits without rewriting the entire file."),
+		mcp.WithString("path", mcp.Required(), mcp.Description("The path of the page to edit")),
+		mcp.WithString("target", mcp.Required(), mcp.Description("The exact string to replace")),
+		mcp.WithString("replacement", mcp.Required(), mcp.Description("The content to replace it with")),
+	)
+
+	s.AddTool(editPageTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		pathParam := strings.Trim(req.GetString("path", ""), "/")
+		target := req.GetString("target", "")
+		replacement := req.GetString("replacement", "")
+
+		if pathParam == "" || target == "" {
+			return mcp.NewToolResultError("path and target are required"), nil
+		}
+
+		page, err := w.FindByPath(pathParam)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Page not found: %s", pathParam)), nil
+		}
+
+		if !strings.Contains(page.Content, target) {
+			return mcp.NewToolResultError("Target string not found in page content"), nil
+		}
+
+		newContent := strings.Replace(page.Content, target, replacement, 1)
+
+		updated, err := w.UpdatePage(mcpUserID, page.ID, page.Title, page.Slug, &newContent, nil)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to update page: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Page edited successfully.\nID: %s\nPath: %s\nTarget replaced.", updated.ID, updated.CalculatePath())), nil
+	})
+
+	// 9. Tool: get_page_info
+	getPageInfoTool := mcp.NewTool("get_page_info",
+		mcp.WithDescription("Get metadata (ID, path, kind, dates) for a page without loading its full content"),
+		mcp.WithString("path", mcp.Required(), mcp.Description("The path of the page")),
+	)
+
+	s.AddTool(getPageInfoTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		pathParam := strings.Trim(req.GetString("path", ""), "/")
+		if pathParam == "" {
+			return mcp.NewToolResultError("path is required"), nil
+		}
+
+		page, err := w.FindByPath(pathParam)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Page not found: %s", pathParam)), nil
+		}
+
+		kindLabel := "page"
+		if page.Kind == tree.NodeKindSection {
+			kindLabel = "section"
+		}
+
+		info := fmt.Sprintf("ID: %s\nTitle: %s\nPath: %s\nKind: %s\nCreated: %s\nUpdated: %s\nCreator ID: %s",
+			page.ID, page.Title, page.CalculatePath(), kindLabel, page.Metadata.CreatedAt.Format("2006-01-02 15:04:05"), page.Metadata.UpdatedAt.Format("2006-01-02 15:04:05"), page.Metadata.CreatorID)
+		
+		return mcp.NewToolResultText(info), nil
+	})
+
+	// 10. Tool: get_backlinks
+	getBacklinksTool := mcp.NewTool("get_backlinks",
+		mcp.WithDescription("Get all pages linking TO a given page"),
+		mcp.WithString("path", mcp.Required(), mcp.Description("The path of the page")),
+	)
+
+	s.AddTool(getBacklinksTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		pathParam := strings.Trim(req.GetString("path", ""), "/")
+		if pathParam == "" {
+			return mcp.NewToolResultError("path is required"), nil
+		}
+
+		page, err := w.FindByPath(pathParam)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Page not found: %s", pathParam)), nil
+		}
+
+		res, err := w.GetBacklinks(page.ID)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Error getting backlinks: %v", err)), nil
+		}
+
+		if len(res.Backlinks) == 0 {
+			return mcp.NewToolResultText("No backlinks found."), nil
+		}
+
+		var b strings.Builder
+		for _, link := range res.Backlinks {
+			b.WriteString(fmt.Sprintf("- [%s] (ID: %s)\n", link.FromTitle, link.FromPageID))
+		}
+		
+		return mcp.NewToolResultText(b.String()), nil
+	})
+
+	// Resources
+	// Resource: wiki://pages/{path}
+	s.AddResourceTemplate(
+		mcp.ResourceTemplate{
+			URITemplate: &mcp.URITemplate{Template: "wiki://pages/{path}"},
+			Name:        "Wiki Page",
+			Description: "Access the markdown content of any Wiki page by its path",
+			MIMEType:    "text/markdown",
+		},
+		func(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+			path := strings.Trim(strings.TrimPrefix(req.Params.URI, "wiki://pages/"), "/")
+			page, err := w.FindByPath(path)
+			if err != nil {
+				return nil, fmt.Errorf("page not found: %s", path)
+			}
+			return []mcp.ResourceContents{
+				mcp.TextResourceContents{
+					URI:      req.Params.URI,
+					Text:     page.Content,
+					MIMEType: "text/markdown",
+				},
+			}, nil
+		},
+	)
+
+	// Resource: wiki://tree
+	s.AddResource(
+		mcp.Resource{
+			URI:         "wiki://tree",
+			Name:        "Wiki Tree",
+			Description: "Full hierarchical tree structure of the entire wiki",
+			MIMEType:    "text/plain",
+		},
+		func(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+			rootNode := w.GetTree()
+			if rootNode == nil {
+				return nil, fmt.Errorf("wiki is empty")
+			}
+			var b strings.Builder
+			var walk func(node *tree.PageNode, indent string)
+			walk = func(node *tree.PageNode, indent string) {
+				if node == nil {
+					return
+				}
+				if node.ID != "root" {
+					kindLabel := "page"
+					if node.Kind == tree.NodeKindSection {
+						kindLabel = "section"
+					}
+					b.WriteString(fmt.Sprintf("%s- %s (path: %s, kind: %s)\n", indent, node.Title, node.CalculatePath(), kindLabel))
+				}
+				for _, child := range node.Children {
+					if node.ID == "root" {
+						walk(child, indent)
+					} else {
+						walk(child, indent+"  ")
+					}
+				}
+			}
+			walk(rootNode, "")
+			return []mcp.ResourceContents{
+				mcp.TextResourceContents{
+					URI:      "wiki://tree",
+					Text:     b.String(),
+					MIMEType: "text/plain",
+				},
+			}, nil
+		},
+	)
+
+	// Prompts
+	s.AddPrompt(mcp.Prompt{
+		Name:        "summarize-page",
+		Description: "Read a page and generate a concise summary",
+		Arguments: []mcp.PromptArgument{
+			{Name: "path", Description: "Path of the page to summarize", Required: true},
+			{Name: "style", Description: "Summary style: 'prose' (default), 'bullet', or 'tldr'", Required: false},
+		},
+	}, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		pathParam := req.Arguments["path"]
+		style := req.Arguments["style"]
+		if style == "" {
+			style = "prose"
+		}
+
+		var styleInstruction string
+		switch style {
+		case "bullet":
+			styleInstruction = "Write the summary as a concise bullet-point list of the key points."
+		case "tldr":
+			styleInstruction = "Write a single short paragraph (2-3 sentences) TL;DR summary."
+		default:
+			styleInstruction = "Write a short prose summary of 1-2 paragraphs covering the main topics."
+		}
+
+		return &mcp.GetPromptResult{
+			Messages: []mcp.PromptMessage{
+				{
+					Role: mcp.RoleSystem,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "You are a helpful wiki assistant. When asked to summarize a page, use the `read_page` tool to fetch its content first. If the page is not found or returns an error, inform the user clearly instead of guessing the content.",
+					},
+				},
+				{
+					Role: mcp.RoleUser,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: fmt.Sprintf("Please read the wiki page at `%s` using the `read_page` tool and summarize its contents.\n\n%s", pathParam, styleInstruction),
+					},
+				},
+			},
+		}, nil
+	})
+
+	s.AddPrompt(mcp.Prompt{
+		Name:        "document-from-notes",
+		Description: "Take rough notes and create a well-structured wiki page",
+		Arguments: []mcp.PromptArgument{
+			{Name: "path", Description: "Path where the new page should be created (e.g. guides/setup)", Required: true},
+			{Name: "title", Description: "Display title for the page", Required: true},
+			{Name: "notes", Description: "The rough notes to convert into documentation", Required: true},
+		},
+	}, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		pathParam := req.Arguments["path"]
+		titleParam := req.Arguments["title"]
+		notesParam := req.Arguments["notes"]
+		return &mcp.GetPromptResult{
+			Messages: []mcp.PromptMessage{
+				{
+					Role: mcp.RoleSystem,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "You are a technical documentation assistant. Follow these steps:\n1. Use `get_page_info` to check whether the target path already exists.\n2. Organize the user's notes into a well-structured Markdown document using the following conventions: ATX-style headings (##, ###), fenced code blocks with language tags, bullet or numbered lists where appropriate, and no YAML frontmatter.\n3. If the page does not exist, use `create_page` with the provided title and content. If it already exists, use `update_page` to replace the content rather than creating a duplicate.",
+					},
+				},
+				{
+					Role: mcp.RoleUser,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: fmt.Sprintf("Please format the notes below into a well-structured wiki page, then publish it.\n\nPath: `%s`\nTitle: %s\n\nNotes:\n%s", pathParam, titleParam, notesParam),
+					},
+				},
+			},
+		}, nil
+	})
+
+	// 3. Prompt: fix-broken-links
+	s.AddPrompt(mcp.Prompt{
+		Name:        "fix-broken-links",
+		Description: "Scan the wiki for broken internal links and offer to repair them",
+	}, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		return &mcp.GetPromptResult{
+			Messages: []mcp.PromptMessage{
+				{
+					Role: mcp.RoleSystem,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "You are a wiki maintenance assistant. Your job is to find and fix broken internal links.\n\nFollow these steps:\n1. Use `list_pages` to get every page in the wiki.\n2. For each page, use `get_backlinks` to identify any links marked as broken.\n3. For each broken link found, use `read_page` on the source page to inspect the surrounding context.\n4. Use `search_wiki` to find the likely correct target page.\n5. Use `edit_page` to replace each broken link reference with the correct path.\n6. Report a summary of all links fixed and any that could not be resolved automatically.",
+					},
+				},
+				{
+					Role: mcp.RoleUser,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "Please scan the entire wiki for broken internal links and fix any that you can resolve confidently. Report everything you find and do.",
+					},
+				},
+			},
+		}, nil
+	})
+
+	// 4. Prompt: review-page
+	s.AddPrompt(mcp.Prompt{
+		Name:        "review-page",
+		Description: "Review a page for clarity, completeness, and quality, with optional inline fixes",
+		Arguments: []mcp.PromptArgument{
+			{Name: "path", Description: "Path of the page to review", Required: true},
+			{Name: "fix", Description: "If 'true', apply suggested improvements directly using edit_page. Default: false (report only).", Required: false},
+		},
+	}, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		pathParam := req.Arguments["path"]
+		fix := req.Arguments["fix"]
+		actionInstruction := "Report your findings as a structured list — do not modify the page."
+		if fix == "true" {
+			actionInstruction = "For each issue you are confident about, apply the fix directly using `edit_page`. List every change made."
+		}
+		return &mcp.GetPromptResult{
+			Messages: []mcp.PromptMessage{
+				{
+					Role: mcp.RoleSystem,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "You are a technical writing reviewer. Evaluate wiki pages for: clarity and conciseness, logical structure and heading hierarchy, missing or incomplete sections, outdated or ambiguous phrasing, and broken or suspicious link patterns. Be specific and actionable in your feedback.",
+					},
+				},
+				{
+					Role: mcp.RoleUser,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: fmt.Sprintf("Please review the wiki page at `%s` using the `read_page` tool.\n\n%s", pathParam, actionInstruction),
+					},
+				},
+			},
+		}, nil
+	})
+
+	// 5. Prompt: expand-stub
+	s.AddPrompt(mcp.Prompt{
+		Name:        "expand-stub",
+		Description: "Detect a short stub page and expand it with additional content",
+		Arguments: []mcp.PromptArgument{
+			{Name: "path", Description: "Path of the stub page to expand", Required: true},
+			{Name: "instructions", Description: "What to add or expand on (e.g. 'add prerequisites and a quickstart example')", Required: true},
+		},
+	}, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		pathParam := req.Arguments["path"]
+		instructions := req.Arguments["instructions"]
+		return &mcp.GetPromptResult{
+			Messages: []mcp.PromptMessage{
+				{
+					Role: mcp.RoleSystem,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "You are a technical documentation writer. When expanding a stub page:\n1. Use `read_page` to fetch the current content.\n2. Write the expanded version, preserving all existing content and appending or integrating new sections as instructed.\n3. Use ATX headings (##, ###), fenced code blocks with language tags, and no YAML frontmatter.\n4. Use `update_page` to save the result.",
+					},
+				},
+				{
+					Role: mcp.RoleUser,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: fmt.Sprintf("Please expand the stub page at `%s`.\n\nWhat to add: %s", pathParam, instructions),
+					},
+				},
+			},
+		}, nil
+	})
+
+	// 6. Prompt: reorganize-section
+	s.AddPrompt(mcp.Prompt{
+		Name:        "reorganize-section",
+		Description: "Propose and execute a better hierarchy for the children of a wiki section",
+		Arguments: []mcp.PromptArgument{
+			{Name: "section_path", Description: "Path of the section to reorganize (e.g. guides)", Required: true},
+		},
+	}, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		sectionPath := req.Arguments["section_path"]
+		return &mcp.GetPromptResult{
+			Messages: []mcp.PromptMessage{
+				{
+					Role: mcp.RoleSystem,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "You are a wiki information architect. When reorganizing a section:\n1. Use `list_pages` to see the full wiki tree.\n2. Use `get_page_info` and `read_page` on the target section's children to understand their content.\n3. Propose a clearer hierarchy with a brief rationale for each move.\n4. Ask the user to confirm before making any changes.\n5. Execute approved moves using `move_page`.",
+					},
+				},
+				{
+					Role: mcp.RoleUser,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: fmt.Sprintf("Please analyse the section at `%s` and propose a better organisation for its child pages. Show me the proposed structure before making any changes.", sectionPath),
+					},
+				},
+			},
+		}, nil
+	})
+
+	// 7. Prompt: generate-index-page
+	s.AddPrompt(mcp.Prompt{
+		Name:        "generate-index-page",
+		Description: "Generate a structured index/overview page for a section from its child pages",
+		Arguments: []mcp.PromptArgument{
+			{Name: "section_path", Description: "Path of the section to index (e.g. guides)", Required: true},
+			{Name: "index_path", Description: "Path where the index page should be saved (defaults to section_path/index if omitted)", Required: false},
+		},
+	}, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		sectionPath := req.Arguments["section_path"]
+		indexPath := req.Arguments["index_path"]
+		if indexPath == "" {
+			indexPath = sectionPath + "/index"
+		}
+		return &mcp.GetPromptResult{
+			Messages: []mcp.PromptMessage{
+				{
+					Role: mcp.RoleSystem,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "You are a documentation assistant that creates index pages. Follow these steps:\n1. Use `list_pages` to find all child pages of the target section.\n2. Use `read_page` on each child to extract a one-sentence description of its content.\n3. Write a Markdown index page with: a short introductory paragraph about the section, a table or bullet list of child pages with their path and description, and a 'See also' section for any related sections found via `search_wiki`.\n4. Use `get_page_info` to check if the index path already exists, then use `create_page` or `update_page` accordingly.",
+					},
+				},
+				{
+					Role: mcp.RoleUser,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: fmt.Sprintf("Please generate an index page for the `%s` section and save it at `%s`.", sectionPath, indexPath),
+					},
+				},
+			},
+		}, nil
+	})
+
+	// 8. Prompt: find-related-pages
+	s.AddPrompt(mcp.Prompt{
+		Name:        "find-related-pages",
+		Description: "Search the wiki for all pages related to a topic using multiple query variations",
+		Arguments: []mcp.PromptArgument{
+			{Name: "topic", Description: "The topic or concept to search for", Required: true},
+		},
+	}, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		topic := req.Arguments["topic"]
+		return &mcp.GetPromptResult{
+			Messages: []mcp.PromptMessage{
+				{
+					Role: mcp.RoleSystem,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "You are a wiki research assistant. To find all pages related to a topic:\n1. Identify 3-5 different query variations or synonyms for the topic.\n2. Run `search_wiki` for each variation.\n3. Deduplicate the results across all queries.\n4. Return a ranked list grouped by relevance, showing the page path, title, and excerpt for each result.",
+					},
+				},
+				{
+					Role: mcp.RoleUser,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: fmt.Sprintf("Please find all wiki pages related to the topic: **%s**", topic),
+					},
+				},
+			},
+		}, nil
+	})
+
+	// 9. Prompt: audit-orphan-pages
+	s.AddPrompt(mcp.Prompt{
+		Name:        "audit-orphan-pages",
+		Description: "Find pages with no inbound links that may need to be linked or removed",
+	}, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		return &mcp.GetPromptResult{
+			Messages: []mcp.PromptMessage{
+				{
+					Role: mcp.RoleSystem,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "You are a wiki maintenance assistant. To audit orphan pages:\n1. Use `list_pages` to get every page in the wiki.\n2. For each page, call `get_backlinks` and check if the backlink count is zero.\n3. Compile a list of all orphaned pages (path, title, kind).\n4. For each orphan, use `search_wiki` with the page title to suggest existing pages that could link to it.\n5. Present the full orphan report with suggested linking opportunities.",
+					},
+				},
+				{
+					Role: mcp.RoleUser,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "Please scan the entire wiki and produce a report of all pages that have no inbound links. For each orphan, suggest which existing pages could reasonably link to it.",
+					},
+				},
+			},
+		}, nil
+	})
+
+	// 10. Prompt: translate-page
+	s.AddPrompt(mcp.Prompt{
+		Name:        "translate-page",
+		Description: "Translate a wiki page to another language and save it at a parallel path",
+		Arguments: []mcp.PromptArgument{
+			{Name: "path", Description: "Path of the page to translate (e.g. guides/setup)", Required: true},
+			{Name: "language", Description: "Target language (e.g. 'French', 'German', 'Spanish')", Required: true},
+			{Name: "language_code", Description: "Short language code used as path prefix (e.g. 'fr', 'de', 'es')", Required: true},
+		},
+	}, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		pathParam := req.Arguments["path"]
+		language := req.Arguments["language"]
+		langCode := req.Arguments["language_code"]
+		targetPath := langCode + "/" + pathParam
+		return &mcp.GetPromptResult{
+			Messages: []mcp.PromptMessage{
+				{
+					Role: mcp.RoleSystem,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "You are a professional technical translator. When translating a wiki page:\n1. Use `read_page` to fetch the original content.\n2. Translate the full Markdown content — including headings, prose, and list items — preserving all Markdown formatting, code blocks (do not translate code), and internal link paths unchanged.\n3. Use `get_page_info` to check if the target path already exists, then use `create_page` or `update_page` accordingly.",
+					},
+				},
+				{
+					Role: mcp.RoleUser,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: fmt.Sprintf("Please translate the wiki page at `%s` into %s and save the result at `%s`.", pathParam, language, targetPath),
+					},
+				},
+			},
+		}, nil
+	})
+
+	// 11. Prompt: changelog-entry
+	s.AddPrompt(mcp.Prompt{
+		Name:        "changelog-entry",
+		Description: "Append a formatted changelog entry to a designated changelog page",
+		Arguments: []mcp.PromptArgument{
+			{Name: "changelog_path", Description: "Path of the changelog page (e.g. project/changelog)", Required: true},
+			{Name: "version", Description: "Version or date label for the entry (e.g. 'v1.2.0' or '2026-03-17')", Required: true},
+			{Name: "changes", Description: "Description of the changes to record", Required: true},
+		},
+	}, func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		changelogPath := req.Arguments["changelog_path"]
+		version := req.Arguments["version"]
+		changes := req.Arguments["changes"]
+		return &mcp.GetPromptResult{
+			Messages: []mcp.PromptMessage{
+				{
+					Role: mcp.RoleSystem,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: "You are a release documentation assistant. To append a changelog entry:\n1. Use `read_page` to fetch the current changelog content.\n2. Format the new entry as a level-2 heading (`## <version>`) followed by a bullet list of changes.\n3. Insert the new entry directly after the first level-1 heading (or at the top if none exists), so newest entries appear first.\n4. Use `edit_page` with the exact surrounding text as the target to insert the new entry in the correct position without altering any existing content.",
+					},
+				},
+				{
+					Role: mcp.RoleUser,
+					Content: mcp.TextContent{
+						Type: "text",
+						Text: fmt.Sprintf("Please add a new changelog entry to `%s`.\n\nVersion: %s\nChanges:\n%s", changelogPath, version, changes),
+					},
+				},
+			},
+		}, nil
+	})
+
 	return s
 }
